@@ -1,56 +1,95 @@
-Продвинутый учебный CQRS: Event Store + Read Projection
-========================================================
+Продвинутый учебный CQRS: Event Store + Read Projection + PostgreSQL
+=======================================================================
 
-Что такое CQRS
---------------
+Что изучаем
+-----------
 
-CQRS (Command Query Responsibility Segregation) отделяет действия, изменяющие состояние, от запросов, которые только читают данные. Для write-операций и read-запросов можно выбрать разные модели и хранилища.
+CQRS (Command Query Responsibility Segregation) отделяет действия, изменяющие состояние, от запросов, которые только читают данные. Для write-операций и read-запросов используются отдельные модели.
 
-Этот пример развивает базовый CQRS:
+В этом демо:
 
 - Commands: `CreateTaskCommand`, `CompleteTaskCommand`.
 - Write side проверяет бизнес-правила и добавляет неизменяемые события в `stored_events`.
-- Event Store сохраняет события в H2.
-- Read side поддерживает отдельную денормализованную таблицу `task_read_model`.
-- Projection обновляется после команды и может быть пересобрана replay-ом event store.
+- Event Store хранит события в PostgreSQL.
+- Read side поддерживает отдельную таблицу `task_read_model`.
+- Projection обновляется после команды и может быть пересобрана replay-ем event store.
 
-Важное уточнение: проект использует event store как источник событий и умеет rebuild projection. Это вводный образец, не готовая production-система: нет outbox, версионирования схем, параллельной доставки, миграций БД, идемпотентной обработки и контроля доступа к admin API.
+Проект демонстрационный: write событие и read projection обновляются синхронно. Нет outbox, схемной миграции, асинхронного брокера и production настройки доступа.
 
-Основной поток
---------------
+Поток обработки
+---------------
 
 ```text
 POST command
   -> TaskCommandHandler (validation/business rules)
-  -> EventStore (append TaskCreated/TaskCompleted)
+  -> EventStore (append event in PostgreSQL)
   -> TaskProjectionService (update read model)
   -> GET query reads task_read_model
 ```
 
-События хранят факты («задача создана», «задача завершена»), а не инструкции. Пересборка читает журнал событий и воспроизводит проекцию.
+События фиксируют уже случившиеся факты («задача создана», «задача завершена»). Проекция восстанавливается чтением журнала и повторным применением событий.
 
 Элементы проекта
 ----------------
 
-- `command/` — типы команд и handler бизнес-логики.
+- `command/` — команды и handler бизнес-логики.
 - `domain/` — события и доменные исключения.
-- `eventstore/` — JPA entity/repository и сервис записи/чтения журнала.
+- `eventstore/` — JPA entity/repository и сервис журнала событий.
 - `readmodel/` — отдельная JPA-модель, repository и projection service.
 - `query/` — сервис чтения read model.
-- `web/TaskApiController` — REST endpoints; `web/ApiExceptionHandler` — JSON ошибки.
-- `CqrsEventStoreIntegrationTest` — тесты записи событий, обновления и восстановления проекции.
-- `application.yml` — файл H2 DB `./data/cqrs-demo`.
+- `web/TaskApiController` — REST API; `ApiExceptionHandler` — JSON ошибки.
+- `CqrsEventStoreIntegrationTest` — тесты записи событий, read-модели и rebuild.
+- `compose.yaml` — PostgreSQL 17 с постоянным Docker volume.
+- `src/main/resources/application.yml` — конфигурация PostgreSQL, параметры подключения можно задать env-переменными.
+- `src/test/resources/application.yml` — изолированная in-memory H2 только для тестов; приложение при обычном запуске использует PostgreSQL.
 
-Запуск
-------
+Требования
+----------
 
-Нужны JDK 17+ и Gradle 8.x. Из корня:
+- JDK 17+
+- Gradle 8.x
+- Docker Engine и Docker Compose plugin
+- Свободные порты 8080 и 5432
+
+Запуск PostgreSQL и приложения
+------------------------------
+
+В корне репозитория запусти PostgreSQL:
+
+```bash
+docker compose up -d postgres
+```
+
+Посмотреть статус и дождаться `healthy`:
+
+```bash
+docker compose ps
+docker compose logs -f postgres
+```
+
+Затем в другом терминале запусти Spring Boot:
 
 ```bash
 gradle bootRun
 ```
 
-Сервер доступен на http://localhost:8080. Остановить `Ctrl+C`. H2 console: `http://localhost:8080/h2-console`; JDBC URL `jdbc:h2:file:./data/cqrs-demo`, user `sa`, пустой password.
+Приложение подключается к `localhost:5432`, database `cqrs_demo`, user `cqrs`, password `cqrs_local_password`. Это локальные демонстрационные credentials, не используй их в production. Остановить приложение: `Ctrl+C`.
+
+Параметры подключения можно переопределить переменными окружения `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`.
+
+Остановить PostgreSQL:
+
+```bash
+docker compose down
+```
+
+Команда сохраняет данные в volume `postgres_data`. Удалить контейнер и все данные БД:
+
+```bash
+docker compose down -v
+```
+
+Внимание: `-v` необратимо удаляет данные PostgreSQL этого демо.
 
 Команды и запросы
 -----------------
@@ -76,7 +115,7 @@ curl http://localhost:8080/api/queries/tasks
 curl -i -X POST http://localhost:8080/api/commands/tasks/<task-id>/complete
 ```
 
-Посмотри сохранённые события и проекцию:
+Посмотри журнал событий, перестрой проекцию и прочитай результат:
 
 ```bash
 curl http://localhost:8080/api/admin/events
@@ -84,10 +123,10 @@ curl -X POST http://localhost:8080/api/admin/projections/tasks/rebuild
 curl http://localhost:8080/api/queries/tasks/<task-id>
 ```
 
-Тесты
------
+Запуск тестов
+-------------
 
-Все тесты:
+Тесты выполняются на отдельной in-memory H2 базе и не требуют запущенного Docker/PostgreSQL. Рабочее приложение использует PostgreSQL.
 
 ```bash
 gradle test
@@ -99,21 +138,40 @@ gradle test
 gradle test --tests 'ru.demo.cqrs.CqrsEventStoreIntegrationTest'
 ```
 
-Состояние базы
---------------
+Проверка PostgreSQL вручную
+---------------------------
 
-H2 file DB сохраняется в `./data`. Для сброса останови приложение и удали каталог `data/`.
+Открыть интерактивный psql внутри работающего контейнера:
+
+```bash
+docker compose exec postgres psql -U cqrs -d cqrs_demo
+```
+
+Полезные команды внутри psql:
+
+```sql
+\dt
+SELECT id, aggregate_id, event_type, occurred_at FROM stored_events ORDER BY id;
+SELECT id, title, completed, created_at, completed_at FROM task_read_model ORDER BY created_at;
+\q
+```
+
+Одноразовый запрос без интерактивной консоли:
+
+```bash
+docker compose exec postgres psql -U cqrs -d cqrs_demo -c "SELECT id, aggregate_id, event_type FROM stored_events ORDER BY id;"
+```
 
 CQRS и Event Sourcing — не одно и то же
 ---------------------------------------
 
-CQRS разделяет write и read модели. Event Sourcing хранит каждое изменение как долговечное событие, из которого можно восстановить состояние. Здесь демонстрируется event store/replay, но это всё ещё учебная упрощённая реализация; CQRS можно применять и без Event Sourcing.
+CQRS разделяет write и read моде��и. Event Sourcing хранит изменения в виде событий, из которых можно восстановить состояние. Здесь есть журнал событий и replay проекции, но CQRS можно применять и без Event Sourcing.
 
 Ограничения и production темы
 -----------------------------
 
-- Write event и read projection сейчас обновляются синхронно в одной транзакции для простоты. Реальные асинхронные projections могут быть eventually consistent.
-- Для надёжной публикации обычно рассматривают transactional outbox и повторную обработку.
-- Схемы событий нужно версионировать; payload и event type не стоит менять без миграционной стратегии.
-- Admin/rebuild endpoints в учебном примере открыты; production должен защищать их авторизацией.
-- H2 — локальная база, не production storage.
+- Проекция обновляется синхронно в той же операции для простоты; асинхронная проекция обычно eventual consistent.
+- Для надёжной публикации событий между БД и брокером изучают transactional outbox.
+- Схемы событий нужно версионировать и мигрировать.
+- Admin/rebuild endpoints в примере открыты; production должен защищать их авторизацией.
+- Изменения таблиц приложения автоматически применяются через `ddl-auto: update` только для удобства демо; production следует использовать Flyway/Liquibase и `ddl-auto: validate`.

@@ -22,7 +22,7 @@ public class StoredEventEntity {
     @Column(nullable = false)
     private String eventType;
 
-    @Column(nullable = false, length = 4000)
+    @Column(nullable = false, columnDefinition = "text")
     private String payload;
 
     @Column(nullable = false)
