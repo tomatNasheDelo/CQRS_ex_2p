@@ -1,0 +1,119 @@
+Продвинутый учебный CQRS: Event Store + Read Projection
+========================================================
+
+Что такое CQRS
+--------------
+
+CQRS (Command Query Responsibility Segregation) отделяет действия, изменяющие состояние, от запросов, которые только читают данные. Для write-операций и read-запросов можно выбрать разные модели и хранилища.
+
+Этот пример развивает базовый CQRS:
+
+- Commands: `CreateTaskCommand`, `CompleteTaskCommand`.
+- Write side проверяет бизнес-правила и добавляет неизменяемые события в `stored_events`.
+- Event Store сохраняет события в H2.
+- Read side поддерживает отдельную денормализованную таблицу `task_read_model`.
+- Projection обновляется после команды и может быть пересобрана replay-ом event store.
+
+Важное уточнение: проект использует event store как источник событий и умеет rebuild projection. Это вводный образец, не готовая production-система: нет outbox, версионирования схем, параллельной доставки, миграций БД, идемпотентной обработки и контроля доступа к admin API.
+
+Основной поток
+--------------
+
+```text
+POST command
+  -> TaskCommandHandler (validation/business rules)
+  -> EventStore (append TaskCreated/TaskCompleted)
+  -> TaskProjectionService (update read model)
+  -> GET query reads task_read_model
+```
+
+События хранят факты («задача создана», «задача завершена»), а не инструкции. Пересборка читает журнал событий и воспроизводит проекцию.
+
+Элементы проекта
+----------------
+
+- `command/` — типы команд и handler бизнес-логики.
+- `domain/` — события и доменные исключения.
+- `eventstore/` — JPA entity/repository и сервис записи/чтения журнала.
+- `readmodel/` — отдельная JPA-модель, repository и projection service.
+- `query/` — сервис чтения read model.
+- `web/TaskApiController` — REST endpoints; `web/ApiExceptionHandler` — JSON ошибки.
+- `CqrsEventStoreIntegrationTest` — тесты записи событий, обновления и восстановления проекции.
+- `application.yml` — файл H2 DB `./data/cqrs-demo`.
+
+Запуск
+------
+
+Нужны JDK 17+ и Gradle 8.x. Из корня:
+
+```bash
+gradle bootRun
+```
+
+Сервер доступен на http://localhost:8080. Остановить `Ctrl+C`. H2 console: `http://localhost:8080/h2-console`; JDBC URL `jdbc:h2:file:./data/cqrs-demo`, user `sa`, пустой password.
+
+Команды и запросы
+-----------------
+
+Создай задачу (command):
+
+```bash
+curl -i -X POST http://localhost:8080/api/commands/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Изучить advanced CQRS"}'
+```
+
+Скопируй ID из JSON-ответа и прочитай read model:
+
+```bash
+curl http://localhost:8080/api/queries/tasks/<task-id>
+curl http://localhost:8080/api/queries/tasks
+```
+
+Отправь команду завершения:
+
+```bash
+curl -i -X POST http://localhost:8080/api/commands/tasks/<task-id>/complete
+```
+
+Посмотри сохранённые события и проекцию:
+
+```bash
+curl http://localhost:8080/api/admin/events
+curl -X POST http://localhost:8080/api/admin/projections/tasks/rebuild
+curl http://localhost:8080/api/queries/tasks/<task-id>
+```
+
+Тесты
+-----
+
+Все тесты:
+
+```bash
+gradle test
+```
+
+Только интеграционный тест:
+
+```bash
+gradle test --tests 'ru.demo.cqrs.CqrsEventStoreIntegrationTest'
+```
+
+Состояние базы
+--------------
+
+H2 file DB сохраняется в `./data`. Для сброса останови приложение и удали каталог `data/`.
+
+CQRS и Event Sourcing — не одно и то же
+---------------------------------------
+
+CQRS разделяет write и read модели. Event Sourcing хранит каждое изменение как долговечное событие, из которого можно восстановить состояние. Здесь демонстрируется event store/replay, но это всё ещё учебная упрощённая реализация; CQRS можно применять и без Event Sourcing.
+
+Ограничения и production темы
+-----------------------------
+
+- Write event и read projection сейчас обновляются синхронно в одной транзакции для простоты. Реальные асинхронные projections могут быть eventually consistent.
+- Для надёжной публикации обычно рассматривают transactional outbox и повторную обработку.
+- Схемы событий нужно версионировать; payload и event type не стоит менять без миграционной стратегии.
+- Admin/rebuild endpoints в учебном примере открыты; production должен защищать их авторизацией.
+- H2 — локальная база, не production storage.
